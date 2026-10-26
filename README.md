@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Campus Event & Society Hub — Room + Firebase
 
 Kotlin + Jetpack Compose Android app for the University of Malawi assessment. Room is the local cache/offline store; Firebase Authentication manages accounts, Cloud Firestore shares events/applications/registrations, and callable Cloud Functions enforce administrator-only approval and account management.
@@ -81,3 +82,7 @@ Use a strong password of at least 12 characters and remember it for the demo. Th
 - The source ZIP does not include Firebase credentials or your project-specific config.
 - Firestore listener sync caches newly observed records into Room; it is not a full bidirectional conflict-resolution engine. Deletions made remotely may remain in the local cache until separately reconciled.
 - For a production deployment, add email verification, rate limiting, App Check, proper privacy/retention handling, and automated Firebase Rules/Functions tests.
+=======
+# CampusEventSocietyHub_Room_Firebase
+The app that put all campus events in one place
+>>>>>>> 106607b170f654f157981953ec4400a7091efe66
