@@ -1,0 +1,7 @@
+# Never commit Firebase service-account credentials
+firebase/scripts/serviceAccountKey.json
+**/serviceAccountKey.json
+# Local Android/Gradle build output
+.gradle/
+**/build/
+local.properties
