@@ -4,7 +4,7 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function userExists() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
     function userDoc() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
-    function isAdmin() { return signedIn() && (request.auth.token.admin == true || (userExists() && userDoc().role == 'ADMIN') || request.auth.token.email == 'admin@campus.local'); }
+    function isAdmin() { return signedIn() && (request.auth.token.admin == true || (userExists() && userDoc().role == 'ADMIN') || request.auth.token.email == 'admincampus@gmail.com'); }
     function isOrganiser() { return signedIn() && (request.auth.token.organiser == true || (userExists() && userDoc().role == 'ORGANISER')); }
     function accountActive() { return signedIn() && (!userExists() || userDoc().active == true); }
 

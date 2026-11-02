@@ -36,11 +36,21 @@ interface CampusDao {
     @Query("""
         SELECT * FROM events
         WHERE status = 'PUBLISHED'
+          AND date >= :today
           AND (:category = 'All' OR category = :category)
           AND (title LIKE '%' || :search || '%' OR location LIKE '%' || :search || '%' OR organiserName LIKE '%' || :search || '%' OR description LIKE '%' || :search || '%')
         ORDER BY date, time
     """)
-    fun searchEvents(search: String, category: String): Flow<List<EventEntity>>
+    fun searchEvents(search: String, category: String, today: String): Flow<List<EventEntity>>
+
+    @Query("SELECT * FROM events WHERE organiserId = :organiserId ORDER BY date, time")
+    fun eventsByOrganiser(organiserId: Long): Flow<List<EventEntity>>
+
+    @Query("SELECT u.* FROM users u INNER JOIN event_registrations r ON u.id = r.studentId WHERE r.eventId = :eventId")
+    fun eventAttendees(eventId: Long): Flow<List<UserEntity>>
+
+    @Query("DELETE FROM events WHERE date < :today")
+    suspend fun deletePassedEvents(today: String)
 
     @Insert
     suspend fun insertEvent(event: EventEntity): Long

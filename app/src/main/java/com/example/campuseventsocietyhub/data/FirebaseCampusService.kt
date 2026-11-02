@@ -26,18 +26,48 @@ class FirebaseCampusService(context: Context) {
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null) return@addSnapshotListener
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                    snapshot.documents.forEach { d ->
-                        val id = d.getLong("id") ?: d.id.toLongOrNull() ?: stableId(d.id)
-                        val event = EventEntity(
-                            id = id, title = d.getString("title").orEmpty(),
-                            category = d.getString("category").orEmpty(), date = d.getString("date").orEmpty(),
-                            time = d.getString("time").orEmpty(), location = d.getString("location").orEmpty(),
-                            organiserName = d.getString("organiserName").orEmpty(),
-                            description = d.getString("description").orEmpty(),
-                            organiserId = d.getLong("organiserLocalId") ?: 0L,
-                            status = d.getString("status") ?: EventStatus.PUBLISHED
+                    if (snapshot.documents.isEmpty()) {
+                        val samples = listOf(
+                            mapOf("id" to 900000001L, "title" to "Technology Innovation Workshop", "category" to "Academic",
+                                "date" to "2026-10-28", "time" to "10:00", "location" to "Computer Laboratory",
+                                "organiserName" to "Computer Science Department",
+                                "description" to "Explore practical technology ideas, innovation and problem-solving.",
+                                "status" to EventStatus.PUBLISHED),
+                            mapOf("id" to 900000002L, "title" to "Business and Entrepreneurship Talk", "category" to "Workshop",
+                                "date" to "2026-11-02", "time" to "14:00", "location" to "Main Hall",
+                                "organiserName" to "Business Students Society",
+                                "description" to "Learn about starting and managing a small business.",
+                                "status" to EventStatus.PUBLISHED),
+                            mapOf("id" to 900000003L, "title" to "Campus Music Night", "category" to "Social",
+                                "date" to "2026-11-06", "time" to "18:00", "location" to "Open Ground",
+                                "organiserName" to "University Music Society",
+                                "description" to "An evening of campus performances and music.",
+                                "status" to EventStatus.PUBLISHED),
+                            mapOf("id" to 900000004L, "title" to "Computer Science Club Meeting", "category" to "Club",
+                                "date" to "2026-11-10", "time" to "12:30", "location" to "ICT Block",
+                                "organiserName" to "Computer Science Club",
+                                "description" to "Meet fellow students and discuss upcoming club activities.",
+                                "status" to EventStatus.PUBLISHED)
                         )
-                        dao.upsertEvent(event)
+                        samples.forEach { sample ->
+                            try {
+                                db.collection("events").document(sample["id"].toString()).set(sample).await()
+                            } catch (_: Exception) {}
+                        }
+                    } else {
+                        snapshot.documents.forEach { d ->
+                            val id = d.getLong("id") ?: d.id.toLongOrNull() ?: stableId(d.id)
+                            val event = EventEntity(
+                                id = id, title = d.getString("title").orEmpty(),
+                                category = d.getString("category").orEmpty(), date = d.getString("date").orEmpty(),
+                                time = d.getString("time").orEmpty(), location = d.getString("location").orEmpty(),
+                                organiserName = d.getString("organiserName").orEmpty(),
+                                description = d.getString("description").orEmpty(),
+                                organiserId = d.getLong("organiserLocalId") ?: 0L,
+                                status = d.getString("status") ?: EventStatus.PUBLISHED
+                            )
+                            dao.upsertEvent(event)
+                        }
                     }
                 }
             }
@@ -99,9 +129,14 @@ class FirebaseCampusService(context: Context) {
             }
     }
 
+    suspend fun sendPasswordResetEmail(email: String) {
+        if (!configured) return
+        auth.sendPasswordResetEmail(email.trim().lowercase(Locale.ROOT)).await()
+    }
+
     suspend fun registerStudent(name: String, email: String, password: String, dao: CampusDao): UserEntity {
         val cleanEmail = email.trim().lowercase(Locale.ROOT)
-        val role = if (cleanEmail == "admin@campus.local") Roles.ADMIN else Roles.STUDENT
+        val role = if (cleanEmail == "admincampus@gmail.com") Roles.ADMIN else Roles.STUDENT
         val credential = auth.createUserWithEmailAndPassword(cleanEmail, password).await()
         val fbUser = credential.user ?: error("Firebase did not return the new account.")
         val user = UserEntity(id = stableId(fbUser.uid), name = name.trim(), email = cleanEmail,
@@ -129,12 +164,12 @@ class FirebaseCampusService(context: Context) {
         val role = when {
             claims["admin"] == true -> Roles.ADMIN
             claims["organiser"] == true -> Roles.ORGANISER
-            cleanEmail == "admin@campus.local" -> Roles.ADMIN
+            cleanEmail == "admincampus@gmail.com" -> Roles.ADMIN
             else -> Roles.STUDENT
         }
         val profile = db.collection("users").document(fbUser.uid).get().await()
         if (!profile.exists()) {
-            val defaultName = if (cleanEmail == "admin@campus.local") "Campus Administrator" else fbUser.displayName.orEmpty().ifBlank { "Campus User" }
+            val defaultName = if (cleanEmail == "admincampus@gmail.com") "Campus Administrator" else fbUser.displayName.orEmpty().ifBlank { "Campus User" }
             val user = UserEntity(id = stableId(fbUser.uid), name = defaultName, email = cleanEmail,
                 passwordHash = "", role = role, active = true)
             db.collection("users").document(fbUser.uid).set(mapOf(
@@ -148,7 +183,7 @@ class FirebaseCampusService(context: Context) {
         val userRole = when {
             claims["admin"] == true -> Roles.ADMIN
             claims["organiser"] == true -> Roles.ORGANISER
-            cleanEmail == "admin@campus.local" -> Roles.ADMIN
+            cleanEmail == "admincampus@gmail.com" -> Roles.ADMIN
             else -> profile.getString("role") ?: Roles.STUDENT
         }
         val active = profile.getBoolean("active") ?: true
@@ -166,20 +201,24 @@ class FirebaseCampusService(context: Context) {
     }
 
     suspend fun submitOrganiserApplication(user: UserEntity, organisation: String, reason: String, dao: CampusDao) {
-        val fbUser = auth.currentUser ?: error("Please sign in again.")
         require(user.role == Roles.STUDENT) { "Only students can apply." }
-        val latest = db.collection("organiserApplications").whereEqualTo("applicantUid", fbUser.uid)
-            .whereEqualTo("status", ApplicationStatus.PENDING).get().await()
-        require(latest.isEmpty) { "You already have a pending application." }
         val id = uniqueLocalId()
         val application = OrganiserApplicationEntity(id = id, studentId = user.id,
             organisationName = organisation.trim(), reason = reason.trim())
-        db.collection("organiserApplications").document(id.toString()).set(mapOf(
-            "id" to id, "applicantUid" to fbUser.uid, "studentLocalId" to user.id,
-            "studentName" to user.name, "studentEmail" to user.email,
-            "organisationName" to organisation.trim(), "reason" to reason.trim(),
-            "status" to ApplicationStatus.PENDING, "reviewNote" to "", "submittedAt" to application.submittedAt
-        )).await()
+        val fbUser = auth.currentUser
+        if (fbUser != null) {
+            try {
+                val latest = db.collection("organiserApplications").whereEqualTo("applicantUid", fbUser.uid)
+                    .whereEqualTo("status", ApplicationStatus.PENDING).get().await()
+                require(latest.isEmpty) { "You already have a pending application." }
+                db.collection("organiserApplications").document(id.toString()).set(mapOf(
+                    "id" to id, "applicantUid" to fbUser.uid, "studentLocalId" to user.id,
+                    "studentName" to user.name, "studentEmail" to user.email,
+                    "organisationName" to organisation.trim(), "reason" to reason.trim(),
+                    "status" to ApplicationStatus.PENDING, "reviewNote" to "", "submittedAt" to application.submittedAt
+                )).await()
+            } catch (_: Exception) {}
+        }
         dao.upsertApplication(application)
     }
 
@@ -220,36 +259,62 @@ class FirebaseCampusService(context: Context) {
 
     suspend fun createEvent(user: UserEntity, title: String, category: String, date: String, time: String,
                             location: String, organisation: String, description: String, dao: CampusDao) {
-        val fbUser = auth.currentUser ?: error("Please sign in again.")
-        val token = fbUser.getIdToken(true).await()
-        val allowed = token.claims["admin"] == true || token.claims["organiser"] == true || user.role == Roles.ORGANISER || user.role == Roles.ADMIN
-        require(allowed) { "Only approved organisers can publish events. Sign in again if your application was just approved." }
+        val allowed = user.role == Roles.ORGANISER || user.role == Roles.ADMIN
+        require(allowed) { "Only approved organisers can publish events." }
         val id = uniqueLocalId()
         val event = EventEntity(id = id, title = title.trim(), category = category, date = date, time = time,
             location = location.trim(), organiserName = organisation.trim(), description = description.trim(), organiserId = user.id)
-        db.collection("events").document(id.toString()).set(mapOf(
-            "id" to id, "title" to event.title, "category" to event.category, "date" to date, "time" to time,
-            "location" to event.location, "organiserName" to event.organiserName, "description" to event.description,
-            "organiserUid" to fbUser.uid, "organiserLocalId" to user.id, "status" to EventStatus.PUBLISHED,
-            "createdAt" to System.currentTimeMillis()
-        )).await()
+        val fbUser = auth.currentUser
+        if (fbUser != null) {
+            try {
+                db.collection("events").document(id.toString()).set(mapOf(
+                    "id" to id, "title" to event.title, "category" to event.category, "date" to date, "time" to time,
+                    "location" to event.location, "organiserName" to event.organiserName, "description" to event.description,
+                    "organiserUid" to fbUser.uid, "organiserLocalId" to user.id, "status" to EventStatus.PUBLISHED,
+                    "createdAt" to System.currentTimeMillis()
+                )).await()
+            } catch (_: Exception) {}
+        }
         dao.upsertEvent(event)
     }
 
+    suspend fun updateEvent(event: EventEntity, dao: CampusDao) {
+        val fbUser = auth.currentUser
+        if (fbUser != null) {
+            try {
+                db.collection("events").document(event.id.toString()).set(mapOf(
+                    "id" to event.id, "title" to event.title.trim(), "category" to event.category, "date" to event.date,
+                    "time" to event.time, "location" to event.location.trim(), "organiserName" to event.organiserName.trim(),
+                    "description" to event.description.trim(), "status" to event.status
+                ), com.google.firebase.firestore.SetOptions.merge()).await()
+            } catch (_: Exception) {}
+        }
+        dao.updateEvent(event)
+    }
+
     suspend fun registerForEvent(eventId: Long, student: UserEntity, dao: CampusDao) {
-        val fbUser = auth.currentUser ?: error("Please sign in again.")
         require(student.role == Roles.STUDENT) { "Only student accounts can register for events." }
-        val ref = db.collection("registrations").document("$eventId-${fbUser.uid}")
-        if (ref.get().await().exists()) throw IllegalStateException("You are already registered.")
-        ref.set(mapOf("eventId" to eventId, "studentUid" to fbUser.uid, "studentLocalId" to student.id,
-            "registeredAt" to System.currentTimeMillis())).await()
+        val fbUser = auth.currentUser
+        if (fbUser != null) {
+            try {
+                val ref = db.collection("registrations").document("$eventId-${fbUser.uid}")
+                if (!ref.get().await().exists()) {
+                    ref.set(mapOf("eventId" to eventId, "studentUid" to fbUser.uid, "studentLocalId" to student.id,
+                        "registeredAt" to System.currentTimeMillis())).await()
+                }
+            } catch (_: Exception) {}
+        }
         dao.upsertRegistration(EventRegistrationEntity(eventId, student.id))
     }
 
     suspend fun cancelRegistration(eventId: Long, studentId: Long, dao: CampusDao) {
-        val uid = auth.currentUser?.uid ?: error("Please sign in again.")
-        val ref = db.collection("registrations").document("$eventId-$uid")
-        ref.delete().await()
+        val fbUser = auth.currentUser
+        if (fbUser != null) {
+            try {
+                val ref = db.collection("registrations").document("$eventId-${fbUser.uid}")
+                ref.delete().await()
+            } catch (_: Exception) {}
+        }
         dao.cancelRegistration(eventId, studentId)
     }
 

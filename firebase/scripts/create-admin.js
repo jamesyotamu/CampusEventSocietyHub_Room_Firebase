@@ -5,7 +5,7 @@ const serviceAccount = require('./serviceAccountKey.json');
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 
 (async () => {
-  const email = process.env.ADMIN_EMAIL || 'admin@campus.local';
+  const email = process.env.ADMIN_EMAIL || 'admincampus@gmail.com';
   const password = process.env.ADMIN_PASSWORD;
   if (!password || password.length < 12) {
     throw new Error('Set ADMIN_PASSWORD to a strong password of at least 12 characters.');

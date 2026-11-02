@@ -1,8 +1,20 @@
 package com.example.campuseventsocietyhub
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -16,64 +28,142 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.example.campuseventsocietyhub.data.*
 import com.example.campuseventsocietyhub.ui.theme.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Locale
+
+object EventNotificationHelper {
+    private const val CHANNEL_ID = "campus_event_reminders"
+
+    fun showNotification(context: Context, title: String, message: String) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID, "Campus Event Reminders", NotificationManager.IMPORTANCE_DEFAULT
+            ).apply { description = "Reminders and updates for campus events" }
+            notificationManager.createNotificationChannel(channel)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                return
+            }
+        }
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_popup_reminder)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify((System.currentTimeMillis() % 100000).toInt(), notification)
+    }
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: CampusRepository
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         repository = CampusRepository(CampusDatabase.get(this), this)
         lifecycleScope.launch { repository.seedIfNeeded() }
         setContent {
             CampusEventSocietyHubTheme {
                 Surface(Modifier.fillMaxSize(), color = LightBackground) {
-                    CampusApp(repository)
+                    var showSplash by rememberSaveable { mutableStateOf(true) }
+                    LaunchedEffect(Unit) {
+                        delay(2200)
+                        showSplash = false
+                    }
+                    if (showSplash) {
+                        SplashScreen()
+                    } else {
+                        CampusApp(repository)
+                    }
                 }
             }
         }
     }
 }
 
-private enum class AppPage { LOGIN, REGISTER, HOME, EVENTS, PROFILE, APPLICATION, ADMIN, CREATE_EVENT, REGISTERED }
+private enum class AppPage {
+    LOGIN, REGISTER, HOME, EVENTS, PROFILE, APPLICATION, ADMIN,
+    CREATE_EVENT, REGISTERED, MANAGE_EVENTS, EDIT_EVENT, EVENT_DETAILS, EVENT_ATTENDEES
+}
 
 @Composable
 private fun CampusApp(repo: CampusRepository) {
-    var sessionUser by remember { mutableStateOf<UserEntity?>(null) }
-    val activeUserFlow = remember(sessionUser?.id) {
-        sessionUser?.let { repo.userFlow(it.id) } ?: kotlinx.coroutines.flow.flowOf(null)
+    val context = LocalContext.current
+    var loggedInUserId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val activeUserFlow = remember(loggedInUserId) {
+        loggedInUserId?.let { repo.userFlow(it) } ?: kotlinx.coroutines.flow.flowOf(null)
     }
     val activeUserFromDb by activeUserFlow.collectAsStateWithLifecycle(initialValue = null)
-    val user = activeUserFromDb ?: sessionUser
+    val user = activeUserFromDb
 
     var page by remember { mutableStateOf(AppPage.LOGIN) }
+    var previousPageForDetails by remember { mutableStateOf(AppPage.HOME) }
     var message by remember { mutableStateOf("") }
     var messageIsError by remember { mutableStateOf(false) }
     var search by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("All") }
     var showReminderSettings by remember { mutableStateOf(false) }
     var showAppSettings by remember { mutableStateOf(false) }
+    var showLogoutConfirm by remember { mutableStateOf(false) }
+    var selectedEventToEdit by remember { mutableStateOf<EventEntity?>(null) }
+    var selectedEventAttendees by remember { mutableStateOf<EventEntity?>(null) }
+    var selectedEventForDetails by remember { mutableStateOf<EventEntity?>(null) }
     var eventRemindersEnabled by remember { mutableStateOf(true) }
     var newEventNotificationsEnabled by remember { mutableStateOf(true) }
     var registrationNotificationsEnabled by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = {}
+    )
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     val events by repo.events(search, category).collectAsStateWithLifecycle(initialValue = emptyList())
     val users by repo.users().collectAsStateWithLifecycle(initialValue = emptyList())
     val pending by repo.pendingApplications().collectAsStateWithLifecycle(initialValue = emptyList())
     val allApplications by repo.allApplications().collectAsStateWithLifecycle(initialValue = emptyList())
     val registrationList by (user?.let { repo.registrations(it.id) }
+        ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsStateWithLifecycle(initialValue = emptyList())
+    val organiserEvents by (user?.let { repo.eventsByOrganiser(it.id) }
+        ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsStateWithLifecycle(initialValue = emptyList())
+    val attendeesList by (selectedEventAttendees?.let { repo.eventAttendees(it.id) }
         ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsStateWithLifecycle(initialValue = emptyList())
 
     fun notify(text: String, error: Boolean = false) {
@@ -85,8 +175,20 @@ private fun CampusApp(repo: CampusRepository) {
         if (user != null && !user.active) {
             notify("Your account has been disabled by an administrator.", true)
             repo.signOut()
-            sessionUser = null
+            loggedInUserId = null
             page = AppPage.LOGIN
+        }
+    }
+
+    val isRootPage = page == AppPage.HOME || page == AppPage.LOGIN
+    BackHandler(enabled = !isRootPage) {
+        when (page) {
+            AppPage.REGISTER -> page = AppPage.LOGIN
+            AppPage.APPLICATION, AppPage.ADMIN, AppPage.CREATE_EVENT, AppPage.REGISTERED, AppPage.MANAGE_EVENTS -> page = AppPage.PROFILE
+            AppPage.EVENT_DETAILS -> page = previousPageForDetails
+            AppPage.EVENT_ATTENDEES, AppPage.EDIT_EVENT -> page = AppPage.MANAGE_EVENTS
+            AppPage.EVENTS, AppPage.PROFILE -> page = AppPage.HOME
+            else -> Unit
         }
     }
 
@@ -97,7 +199,7 @@ private fun CampusApp(repo: CampusRepository) {
                 onRegister = { name, email, password ->
                     scope.launch {
                         val result = repo.registerStudent(name, email, password)
-                        result.onSuccess { sessionUser = it; page = AppPage.HOME; notify("Account created successfully.") }
+                        result.onSuccess { loggedInUserId = it.id; page = AppPage.HOME; notify("Account created successfully.") }
                             .onFailure { notify(it.message ?: "Registration failed.", true) }
                     }
                 }
@@ -107,10 +209,17 @@ private fun CampusApp(repo: CampusRepository) {
                 onLogin = { email, password ->
                     scope.launch {
                         repo.login(email, password).onSuccess {
-                            sessionUser = it
+                            loggedInUserId = it.id
                             page = AppPage.HOME
                             notify("Welcome back, ${it.name.substringBefore(" ")}.")
                         }.onFailure { notify(it.message ?: "Login failed.", true) }
+                    }
+                },
+                onForgotPassword = { email ->
+                    scope.launch {
+                        repo.resetPassword(email).onSuccess {
+                            notify("Password reset email sent to $email. Please check your email inbox or spam folder.")
+                        }.onFailure { notify(it.message ?: "Could not send reset email.", true) }
                     }
                 }
             )
@@ -129,7 +238,7 @@ private fun CampusApp(repo: CampusRepository) {
                 ).forEach { (target, icon, label) ->
                     NavigationBarItem(
                         selected = page == target || (target == AppPage.PROFILE &&
-                            page in listOf(AppPage.APPLICATION, AppPage.ADMIN, AppPage.CREATE_EVENT, AppPage.REGISTERED)),
+                            page in listOf(AppPage.APPLICATION, AppPage.ADMIN, AppPage.CREATE_EVENT, AppPage.REGISTERED, AppPage.MANAGE_EVENTS, AppPage.EDIT_EVENT, AppPage.EVENT_ATTENDEES)),
                         onClick = { page = target },
                         icon = { Icon(icon, contentDescription = label) },
                         label = { Text(label) },
@@ -147,38 +256,53 @@ private fun CampusApp(repo: CampusRepository) {
         Column(Modifier.fillMaxSize().padding(padding)) {
             when (page) {
                 AppPage.HOME -> HomeScreen(
-                    user = user!!, events = events, search = search, onSearch = { search = it },
-                    category = category, onCategory = { category = it },
-                    onEvents = { page = AppPage.EVENTS }, onDetails = { page = AppPage.EVENTS }
+                    events = events, category = category, onCategory = { category = it },
+                    onEvents = { page = AppPage.EVENTS },
+                    onSelectEvent = {
+                        selectedEventForDetails = it
+                        previousPageForDetails = AppPage.HOME
+                        page = AppPage.EVENT_DETAILS
+                    }
                 )
                 AppPage.EVENTS -> EventsScreen(
-                    events = events, user = user!!, registrations = registrationList.map { it.eventId }.toSet(),
+                    events = events, user = user, registrations = registrationList.map { it.eventId }.toSet(),
                     search = search, onSearch = { search = it }, category = category, onCategory = { category = it },
+                    onSelectEvent = {
+                        selectedEventForDetails = it
+                        previousPageForDetails = AppPage.EVENTS
+                        page = AppPage.EVENT_DETAILS
+                    },
                     onRegister = { event ->
                         scope.launch {
-                            repo.registerForEvent(event.id, user!!).onSuccess { notify("You are registered for ${event.title}.") }
-                                .onFailure { notify(it.message ?: "Could not register.", true) }
+                            repo.registerForEvent(event.id, user).onSuccess {
+                                notify("You are registered for ${event.title}.")
+                                EventNotificationHelper.showNotification(
+                                    context, "Event Reminder Set 🔔",
+                                    "Reminder saved for ${event.title} on ${event.date} at ${event.time} (${event.location})."
+                                )
+                            }.onFailure { notify(it.message ?: "Could not register.", true) }
                         }
                     },
                     onCancel = { event ->
-                        scope.launch { repo.cancelRegistration(event.id, user!!.id); notify("Registration cancelled.") }
+                        scope.launch { repo.cancelRegistration(event.id, user.id); notify("Registration cancelled.") }
                     }
                 )
                 AppPage.PROFILE -> ProfileScreen(
-                    user = user!!, onApplication = { page = AppPage.APPLICATION },
+                    user = user, onApplication = { page = AppPage.APPLICATION },
                     onAdmin = { page = AppPage.ADMIN }, onCreateEvent = { page = AppPage.CREATE_EVENT },
+                    onManageEvents = { page = AppPage.MANAGE_EVENTS },
                     onRegistered = { page = AppPage.REGISTERED },
                     onReminders = { showReminderSettings = true },
                     onSettings = { showAppSettings = true },
-                    onLogout = { repo.signOut(); sessionUser = null; page = AppPage.LOGIN; search = ""; category = "All" }
+                    onLogout = { showLogoutConfirm = true }
                 )
                 AppPage.APPLICATION -> ApplicationScreen(
-                    user = user!!,
-                    previous = allApplications.firstOrNull { it.studentId == user!!.id },
+                    user = user,
+                    previous = allApplications.firstOrNull { it.studentId == user.id },
                     onBack = { page = AppPage.PROFILE },
                     onSubmit = { organisation, reason ->
                         scope.launch {
-                            repo.applyForOrganiser(user!!, organisation, reason)
+                            repo.applyForOrganiser(user, organisation, reason)
                                 .onSuccess { notify("Application submitted. The administrator must review it."); page = AppPage.PROFILE }
                                 .onFailure { notify(it.message ?: "Could not submit application.", true) }
                         }
@@ -206,22 +330,94 @@ private fun CampusApp(repo: CampusRepository) {
                     onBack = { page = AppPage.PROFILE },
                     onCreate = { title, category, date, time, location, organisation, description ->
                         scope.launch {
-                            repo.createEvent(user!!, title, category, date, time, location, organisation, description)
-                                .onSuccess { notify("Event created and published."); page = AppPage.HOME }
+                            repo.createEvent(user, title, category, date, time, location, organisation, description)
+                                .onSuccess {
+                                    notify("Event created and published.")
+                                    EventNotificationHelper.showNotification(
+                                        context, "New Campus Event 📢",
+                                        "$title has been published for $date at $time!"
+                                    )
+                                    page = AppPage.HOME
+                                }
                                 .onFailure { notify(it.message ?: "Could not create event.", true) }
                         }
                     }
                 )
+                AppPage.MANAGE_EVENTS -> ManageEventsScreen(
+                    organiserEvents = organiserEvents,
+                    onBack = { page = AppPage.PROFILE },
+                    onEdit = { selectedEventToEdit = it; page = AppPage.EDIT_EVENT },
+                    onViewAttendees = { selectedEventAttendees = it; page = AppPage.EVENT_ATTENDEES }
+                )
+                AppPage.EDIT_EVENT -> EditEventScreen(
+                    event = selectedEventToEdit!!,
+                    onBack = { page = AppPage.MANAGE_EVENTS },
+                    onSave = { updated ->
+                        scope.launch {
+                            repo.updateEvent(user, updated)
+                                .onSuccess { notify("Event updated successfully."); page = AppPage.MANAGE_EVENTS }
+                                .onFailure { notify(it.message ?: "Could not update event.", true) }
+                        }
+                    }
+                )
+                AppPage.EVENT_DETAILS -> EventDetailsScreen(
+                    event = selectedEventForDetails!!,
+                    isRegistered = registrationList.any { it.eventId == selectedEventForDetails!!.id },
+                    onBack = { page = previousPageForDetails },
+                    onRegister = { target ->
+                        scope.launch {
+                            repo.registerForEvent(target.id, user).onSuccess {
+                                notify("You are registered for ${target.title}.")
+                                EventNotificationHelper.showNotification(
+                                    context, "Event Reminder Set 🔔",
+                                    "Reminder saved for ${target.title} on ${target.date} at ${target.time}."
+                                )
+                            }.onFailure { notify(it.message ?: "Could not register.", true) }
+                        }
+                    },
+                    onCancel = { target ->
+                        scope.launch { repo.cancelRegistration(target.id, user.id); notify("Registration cancelled.") }
+                    }
+                )
+                AppPage.EVENT_ATTENDEES -> EventAttendeesScreen(
+                    event = selectedEventAttendees!!,
+                    attendees = attendeesList,
+                    onBack = { page = AppPage.MANAGE_EVENTS }
+                )
                 AppPage.REGISTERED -> RegisteredScreen(
                     events = events.filter { event -> registrationList.any { it.eventId == event.id } },
                     onBack = { page = AppPage.PROFILE },
+                    onSelectEvent = {
+                        selectedEventForDetails = it
+                        previousPageForDetails = AppPage.REGISTERED
+                        page = AppPage.EVENT_DETAILS
+                    },
                     onCancel = { event ->
-                        scope.launch { repo.cancelRegistration(event.id, user!!.id); notify("Registration cancelled.") }
+                        scope.launch { repo.cancelRegistration(event.id, user.id); notify("Registration cancelled.") }
                     }
                 )
                 AppPage.LOGIN, AppPage.REGISTER -> Unit
             }
         }
+    }
+
+    if (showLogoutConfirm) {
+        AlertDialog(
+            onDismissRequest = { showLogoutConfirm = false },
+            title = { Text("Log out", color = NavyBlue, fontWeight = FontWeight.Bold) },
+            text = { Text("Are you sure you want to log out of Campus Event Hub?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLogoutConfirm = false
+                    repo.signOut()
+                    loggedInUserId = null
+                    page = AppPage.LOGIN
+                    search = ""
+                    category = "All"
+                }) { Text("Log out", color = ErrorRed, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { showLogoutConfirm = false }) { Text("Cancel") } }
+        )
     }
     if (showReminderSettings) {
         AlertDialog(
@@ -236,7 +432,16 @@ private fun CampusApp(repo: CampusRepository) {
                     SettingSwitch("Registration updates", "Confirmations and cancellations", registrationNotificationsEnabled) { registrationNotificationsEnabled = it }
                 }
             },
-            confirmButton = { TextButton(onClick = { showReminderSettings = false; notify("Notification preferences saved on this device.") }) { Text("Save") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    showReminderSettings = false
+                    EventNotificationHelper.showNotification(
+                        context, "Notifications Saved 🔔",
+                        "Campus Event Hub reminders are active on this device."
+                    )
+                    notify("Notification preferences saved.")
+                }) { Text("Save") }
+            },
             dismissButton = { TextButton(onClick = { showReminderSettings = false }) { Text("Cancel") } }
         )
     }
@@ -290,16 +495,19 @@ private fun BrandHeader(title: String, subtitle: String = "", onBack: (() -> Uni
         }
         if (subtitle.isNotBlank()) {
             Spacer(Modifier.height(5.dp))
-            Text(subtitle, color = White.copy(alpha = .82f), style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, color = White.copy(alpha = .85f), style = MaterialTheme.typography.bodyLarge)
         }
     }
 }
 
 @Composable
-private fun LoginScreen(onRegister: () -> Unit, onLogin: (String, String) -> Unit) {
+private fun LoginScreen(onRegister: () -> Unit, onLogin: (String, String) -> Unit, onForgotPassword: (String) -> Unit) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
+    var showForgotDialog by remember { mutableStateOf(false) }
+    var forgotEmail by remember { mutableStateOf("") }
+
     Column(Modifier.fillMaxSize().background(LightBackground)) {
         BrandHeader("Campus Event Hub", "Discover. Connect. Participate.")
         Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -312,11 +520,39 @@ private fun LoginScreen(onRegister: () -> Unit, onLogin: (String, String) -> Uni
             AppTextField(password, { password = it }, "Password", keyboardType = KeyboardType.Password,
                 visual = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                 trailing = { IconButton(onClick = { showPassword = !showPassword }) { Icon(if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
-            Spacer(Modifier.height(18.dp))
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                TextButton(onClick = { forgotEmail = email; showForgotDialog = true }) {
+                    Text("Forgot password?", color = RoyalBlue, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
             Button(onClick = { onLogin(email, password) }, modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(12.dp)) { Text("Log in", fontWeight = FontWeight.Bold) }
             TextButton(onClick = onRegister) { Text("New to Campus Event Hub? Create an account") }
         }
+    }
+
+    if (showForgotDialog) {
+        AlertDialog(
+            onDismissRequest = { showForgotDialog = false },
+            title = { Text("Reset Password", color = NavyBlue, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text("Enter your email address and we will send you instructions to reset your password.", color = MutedText)
+                    Spacer(Modifier.height(12.dp))
+                    AppTextField(forgotEmail, { forgotEmail = it }, "Email address", keyboardType = KeyboardType.Email)
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showForgotDialog = false
+                    onForgotPassword(forgotEmail)
+                }) { Text("Send reset link") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showForgotDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 }
 
@@ -352,8 +588,8 @@ private fun RegisterScreen(onBack: () -> Unit, onRegister: (String, String, Stri
 
 @Composable
 private fun HomeScreen(
-    user: UserEntity, events: List<EventEntity>, search: String, onSearch: (String) -> Unit,
-    category: String, onCategory: (String) -> Unit, onEvents: () -> Unit, onDetails: () -> Unit
+    events: List<EventEntity>, category: String, onCategory: (String) -> Unit,
+    onEvents: () -> Unit, onSelectEvent: (EventEntity) -> Unit
 ) {
     LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
         item {
@@ -362,12 +598,6 @@ private fun HomeScreen(
                 Spacer(Modifier.height(12.dp))
                 Text("Campus Event Hub", color = White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                 Text("Discover. Connect. Participate.", color = White.copy(alpha = .85f), style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(20.dp))
-                OutlinedTextField(value = search, onValueChange = onSearch, modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Search campus events...") }, leadingIcon = { Icon(Icons.Default.Search, null) },
-                    singleLine = true, shape = RoundedCornerShape(18.dp), colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = White, unfocusedContainerColor = White,
-                        focusedBorderColor = Gold, unfocusedBorderColor = White))
             }
         }
         item {
@@ -389,8 +619,8 @@ private fun HomeScreen(
                 Text("${events.size} events", color = MutedText)
             }
         }
-        if (events.isEmpty()) item { EmptyState("No events found", "Try another search or category.") }
-        items(events.take(4), key = { it.id }) { event -> EventCard(event, actionLabel = "View details →", onAction = onDetails) }
+        if (events.isEmpty()) item { EmptyState("No events found", "Try selecting another category.") }
+        items(events.take(4), key = { it.id }) { event -> EventCard(event, actionLabel = "View details →", onAction = { onSelectEvent(event) }) }
         item {
             TextButton(onClick = onEvents, modifier = Modifier.fillMaxWidth()) { Text("View all events") }
         }
@@ -400,7 +630,8 @@ private fun HomeScreen(
 @Composable
 private fun EventsScreen(
     events: List<EventEntity>, user: UserEntity, registrations: Set<Long>, search: String, onSearch: (String) -> Unit,
-    category: String, onCategory: (String) -> Unit, onRegister: (EventEntity) -> Unit, onCancel: (EventEntity) -> Unit
+    category: String, onCategory: (String) -> Unit, onSelectEvent: (EventEntity) -> Unit,
+    onRegister: (EventEntity) -> Unit, onCancel: (EventEntity) -> Unit
 ) {
     Column(Modifier.fillMaxSize()) {
         BrandHeader("Campus Events", "Search and find activities")
@@ -419,7 +650,8 @@ private fun EventsScreen(
                     EventCard(event, actionLabel = if (registrations.contains(event.id)) "Cancel registration" else "Register for event",
                         onAction = {
                             if (registrations.contains(event.id)) onCancel(event) else onRegister(event)
-                        })
+                        },
+                        onClickCard = { onSelectEvent(event) })
                 }
             }
         }
@@ -427,8 +659,8 @@ private fun EventsScreen(
 }
 
 @Composable
-private fun EventCard(event: EventEntity, actionLabel: String, onAction: () -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp), shape = RoundedCornerShape(22.dp),
+private fun EventCard(event: EventEntity, actionLabel: String, onAction: () -> Unit, onClickCard: (() -> Unit)? = null) {
+    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp).clickable { onClickCard?.invoke() ?: onAction() }, shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.width(68.dp).background(PaleGold, RoundedCornerShape(16.dp)).padding(vertical = 12.dp),
@@ -456,9 +688,90 @@ private fun EventCard(event: EventEntity, actionLabel: String, onAction: () -> U
 }
 
 @Composable
+private fun EventDetailsScreen(
+    event: EventEntity,
+    isRegistered: Boolean,
+    onBack: () -> Unit,
+    onRegister: (EventEntity) -> Unit,
+    onCancel: (EventEntity) -> Unit
+) {
+    Column(Modifier.fillMaxSize().background(LightBackground)) {
+        BrandHeader("Event details", event.category.uppercase(), onBack)
+        LazyColumn(Modifier.weight(1f).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            item {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = White), shape = RoundedCornerShape(20.dp)) {
+                    Column(Modifier.padding(20.dp)) {
+                        Surface(color = PaleGold, shape = RoundedCornerShape(12.dp)) {
+                            Text(event.category.uppercase(), color = NavyBlue, style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text(event.title, color = NavyBlue, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            item {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = White), shape = RoundedCornerShape(20.dp)) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Event, null, tint = RoyalBlue, modifier = Modifier.size(22.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Date & Time", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                Text("${event.date} at ${event.time}", color = DarkText, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                        Divider(color = PaleBlue)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Place, null, tint = RoyalBlue, modifier = Modifier.size(22.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Venue / Location", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                Text(event.location, color = DarkText, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                        Divider(color = PaleBlue)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Group, null, tint = RoyalBlue, modifier = Modifier.size(22.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Organiser", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                Text(event.organiserName, color = DarkText, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = White), shape = RoundedCornerShape(20.dp)) {
+                    Column(Modifier.padding(20.dp)) {
+                        Text("About this event", color = NavyBlue, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(8.dp))
+                        Text(event.description, color = DarkText, style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+            }
+        }
+        Surface(Modifier.fillMaxWidth(), color = White, shadowElevation = 8.dp) {
+            Box(Modifier.padding(16.dp)) {
+                Button(
+                    onClick = { if (isRegistered) onCancel(event) else onRegister(event) },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = if (isRegistered) ButtonDefaults.buttonColors(containerColor = ErrorRed)
+                             else ButtonDefaults.buttonColors(containerColor = NavyBlue)
+                ) {
+                    Text(if (isRegistered) "Cancel registration" else "Register for event", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ProfileScreen(
     user: UserEntity, onApplication: () -> Unit, onAdmin: () -> Unit, onCreateEvent: () -> Unit,
-    onRegistered: () -> Unit, onReminders: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit
+    onManageEvents: () -> Unit, onRegistered: () -> Unit, onReminders: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit
 ) {
     LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
         item {
@@ -482,8 +795,9 @@ private fun ProfileScreen(
         if (user.role == Roles.STUDENT) item {
             ProfileRow(Icons.Default.AssignmentInd, "Apply to become an organiser", "Applications are reviewed by an administrator", onApplication)
         }
-        if (user.role == Roles.ORGANISER) item {
+        if (user.role == Roles.ORGANISER || user.role == Roles.ADMIN) item {
             ProfileRow(Icons.Default.AddCircle, "Create event", "Publish a new campus event", onCreateEvent)
+            ProfileRow(Icons.Default.Edit, "My created events", "Edit events or view registered attendees", onManageEvents)
         }
         if (user.role == Roles.ADMIN) item {
             ProfileRow(Icons.Default.AdminPanelSettings, "Admin dashboard", "Review applications and manage accounts", onAdmin)
@@ -654,12 +968,139 @@ private fun CreateEventScreen(
 }
 
 @Composable
-private fun RegisteredScreen(events: List<EventEntity>, onBack: () -> Unit, onCancel: (EventEntity) -> Unit) {
+private fun ManageEventsScreen(
+    organiserEvents: List<EventEntity>,
+    onBack: () -> Unit,
+    onEdit: (EventEntity) -> Unit,
+    onViewAttendees: (EventEntity) -> Unit
+) {
+    Column(Modifier.fillMaxSize()) {
+        BrandHeader("My created events", "Edit events or check registrations", onBack)
+        LazyColumn(contentPadding = PaddingValues(12.dp)) {
+            if (organiserEvents.isEmpty()) item { EmptyState("No events created", "Events you publish will appear here.") }
+            items(organiserEvents, key = { it.id }) { event ->
+                Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = White), shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(event.title, style = MaterialTheme.typography.titleMedium, color = NavyBlue, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(4.dp))
+                        Text("${event.date} at ${event.time} • ${event.location}", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { onEdit(event) }, modifier = Modifier.weight(1f)) { Text("Edit Event") }
+                            OutlinedButton(onClick = { onViewAttendees(event) }, modifier = Modifier.weight(1f)) { Text("Attendees") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditEventScreen(
+    event: EventEntity,
+    onBack: () -> Unit,
+    onSave: (EventEntity) -> Unit
+) {
+    var title by remember { mutableStateOf(event.title) }
+    var category by remember { mutableStateOf(event.category) }
+    var date by remember { mutableStateOf(event.date) }
+    var time by remember { mutableStateOf(event.time) }
+    var location by remember { mutableStateOf(event.location) }
+    var organisation by remember { mutableStateOf(event.organiserName) }
+    var description by remember { mutableStateOf(event.description) }
+
+    Column(Modifier.fillMaxSize()) {
+        BrandHeader("Edit event", "Update event information", onBack)
+        LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { AppTextField(title, { title = it }, "Event title") }
+            item {
+                Text("Category", color = NavyBlue, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    listOf("Academic", "Workshop", "Social", "Club", "Other").forEach {
+                        FilterChip(selected = category == it, onClick = { category = it }, label = { Text(it) })
+                    }
+                }
+            }
+            item { AppTextField(date, { date = it }, "Date (YYYY-MM-DD)") }
+            item { AppTextField(time, { time = it }, "Time (HH:MM)") }
+            item { AppTextField(location, { location = it }, "Venue") }
+            item { AppTextField(organisation, { organisation = it }, "Organiser / society name") }
+            item {
+                OutlinedTextField(description, { description = it }, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Event description") }, minLines = 4, shape = RoundedCornerShape(12.dp))
+            }
+            item {
+                Button(onClick = {
+                    onSave(event.copy(
+                        title = title, category = category, date = date, time = time,
+                        location = location, organiserName = organisation, description = description
+                    ))
+                }, modifier = Modifier.fillMaxWidth()) { Text("Save changes") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EventAttendeesScreen(
+    event: EventEntity,
+    attendees: List<UserEntity>,
+    onBack: () -> Unit
+) {
+    Column(Modifier.fillMaxSize().background(LightBackground)) {
+        BrandHeader("Registered Attendees", event.title, onBack)
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = White), shape = RoundedCornerShape(18.dp)) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.People, null, tint = RoyalBlue, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("${attendees.size} Students Registered", color = NavyBlue, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                            Text("${event.date} at ${event.time} • ${event.location}", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+            if (attendees.isEmpty()) {
+                item { EmptyState("No registrations yet", "Registered students will appear in this list.") }
+            } else {
+                items(attendees, key = { it.id }) { student ->
+                    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = White), shape = RoundedCornerShape(16.dp)) {
+                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(44.dp).background(PaleBlue, RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
+                                Text(student.name.firstOrNull()?.uppercase() ?: "S", color = NavyBlue, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(student.name, color = NavyBlue, fontWeight = FontWeight.Bold)
+                                Text(student.email, color = MutedText, style = MaterialTheme.typography.bodySmall)
+                            }
+                            Surface(color = PaleGold, shape = RoundedCornerShape(12.dp)) {
+                                Text("Student", color = NavyBlue, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RegisteredScreen(
+    events: List<EventEntity>, onBack: () -> Unit,
+    onSelectEvent: (EventEntity) -> Unit, onCancel: (EventEntity) -> Unit
+) {
     Column(Modifier.fillMaxSize()) {
         BrandHeader("My registered events", "Your event registrations", onBack)
         LazyColumn(contentPadding = PaddingValues(12.dp)) {
             if (events.isEmpty()) item { EmptyState("No registrations yet", "Register for an event from the Events page.") }
-            items(events, key = { it.id }) { event -> EventCard(event, "Cancel registration", { onCancel(event) }) }
+            items(events, key = { it.id }) { event ->
+                EventCard(event, "Cancel registration", { onCancel(event) }, onClickCard = { onSelectEvent(event) })
+            }
         }
     }
 }
@@ -696,4 +1137,105 @@ private fun MessageDialog(message: String, error: Boolean, onDismiss: () -> Unit
         title = { Text(if (error) "Please check" else "Campus Event Hub") },
         text = { Text(message) }
     )
+}
+
+@Composable
+private fun SplashScreen() {
+    val darkBlue = Color(0xFF072448)
+    val circleBlue = Color(0xFF041833)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(darkBlue),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .offset(x = 90.dp, y = (-90).dp)
+                .size(280.dp)
+                .background(circleBlue, shape = androidx.compose.foundation.shape.CircleShape)
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .offset(x = (-100).dp, y = 110.dp)
+                .size(300.dp)
+                .background(circleBlue, shape = androidx.compose.foundation.shape.CircleShape)
+        )
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(24.dp)
+        ) {
+            Surface(
+                color = Gold,
+                shape = RoundedCornerShape(32.dp),
+                modifier = Modifier.size(110.dp),
+                shadowElevation = 8.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.School,
+                        contentDescription = null,
+                        tint = darkBlue,
+                        modifier = Modifier.size(62.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(32.dp))
+            Text(
+                text = "UNIVERSITY OF MALAWI",
+                color = Gold,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = androidx.compose.ui.unit.TextUnit(1.5f, androidx.compose.ui.unit.TextUnitType.Sp)
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Campus Event",
+                color = White,
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "Hub",
+                color = White,
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(18.dp))
+            Text(
+                text = "Discover. Connect. Participate.",
+                color = White.copy(alpha = 0.85f),
+                style = MaterialTheme.typography.bodyLarge
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 48.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(28.dp)
+                    .height(7.dp)
+                    .background(Gold, shape = RoundedCornerShape(50))
+            )
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(White.copy(alpha = 0.5f), shape = androidx.compose.foundation.shape.CircleShape)
+            )
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(White.copy(alpha = 0.5f), shape = androidx.compose.foundation.shape.CircleShape)
+            )
+        }
+    }
 }

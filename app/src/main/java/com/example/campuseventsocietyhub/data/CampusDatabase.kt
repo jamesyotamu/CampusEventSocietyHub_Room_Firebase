@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 @Database(
@@ -50,16 +52,16 @@ class CampusRepository(private val db: CampusDatabase, context: Context? = null)
 
     init { firebase?.startEventCacheSync(dao) }
 
+    private fun todayDate(): String = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
+
     suspend fun seedIfNeeded() = withContext(Dispatchers.IO) {
-        // When Firebase is configured, account/event data comes from the cloud.
-        // Avoid inserting the local demo administrator with the same email but a different UID.
-        if (firebase?.configured == true) return@withContext
+        dao.deletePassedEvents(todayDate())
         db.withTransaction {
-            if (dao.userByEmail("admin@campus.local") == null) {
+            if (dao.userByEmail("admincampus@gmail.com") == null) {
                 dao.insertUser(
                     UserEntity(
                         name = "Campus Administrator",
-                        email = "admin@campus.local",
+                        email = "admincampus@gmail.com",
                         passwordHash = Passwords.hash("Admin12345!"),
                         role = Roles.ADMIN
                     )
@@ -68,22 +70,22 @@ class CampusRepository(private val db: CampusDatabase, context: Context? = null)
             if (dao.eventCount() == 0) {
                 val samples = listOf(
                     EventEntity( title = "Technology Innovation Workshop", category = "Academic",
-                        date = "2026-10-22", time = "10:00", location = "Computer Laboratory",
+                        date = "2026-10-28", time = "10:00", location = "Computer Laboratory",
                         organiserName = "Computer Science Department",
                         description = "Explore practical technology ideas, innovation and problem-solving.",
                         organiserId = 0),
                     EventEntity(title = "Business and Entrepreneurship Talk", category = "Workshop",
-                        date = "2026-10-25", time = "14:00", location = "Main Hall",
+                        date = "2026-11-02", time = "14:00", location = "Main Hall",
                         organiserName = "Business Students Society",
                         description = "Learn about starting and managing a small business.",
                         organiserId = 0),
                     EventEntity(title = "Campus Music Night", category = "Social",
-                        date = "2026-10-28", time = "18:00", location = "Open Ground",
+                        date = "2026-11-06", time = "18:00", location = "Open Ground",
                         organiserName = "University Music Society",
                         description = "An evening of campus performances and music.",
                         organiserId = 0),
                     EventEntity(title = "Computer Science Club Meeting", category = "Club",
-                        date = "2026-11-02", time = "12:30", location = "ICT Block",
+                        date = "2026-11-10", time = "12:30", location = "ICT Block",
                         organiserName = "Computer Science Club",
                         description = "Meet fellow students and discuss upcoming club activities.",
                         organiserId = 0)
@@ -102,13 +104,28 @@ class CampusRepository(private val db: CampusDatabase, context: Context? = null)
         if (password.length < 8 || password.none(Char::isLetter) || password.none(Char::isDigit))
             return Result.failure(IllegalArgumentException("Use at least 8 characters with letters and numbers."))
         if (firebase?.configured == true) {
-            return try { Result.success(firebase.registerStudent(cleanName, cleanEmail, password, dao)) }
-            catch (e: Exception) { Result.failure(IllegalArgumentException(e.message ?: "Firebase registration failed.")) }
+            try {
+                return Result.success(firebase.registerStudent(cleanName, cleanEmail, password, dao))
+            } catch (e: Exception) {
+                val isNetworkError = e.javaClass.simpleName.contains("Network", ignoreCase = true) ||
+                        (e.message?.contains("network", ignoreCase = true) == true) ||
+                        (e.message?.contains("unreachable", ignoreCase = true) == true) ||
+                        (e.message?.contains("timeout", ignoreCase = true) == true)
+                if (isNetworkError) {
+                    if (dao.userByEmail(cleanEmail) != null)
+                        return Result.failure(IllegalArgumentException("An account with this email already exists."))
+                    val role = if (cleanEmail == "admincampus@gmail.com") Roles.ADMIN else Roles.STUDENT
+                    val id = dao.insertUser(UserEntity(name = cleanName, email = cleanEmail,
+                        passwordHash = Passwords.hash(password), role = role))
+                    return Result.success(dao.userById(id)!!)
+                }
+                return Result.failure(IllegalArgumentException(e.message ?: "Firebase registration failed."))
+            }
         }
         if (dao.userByEmail(cleanEmail) != null)
             return Result.failure(IllegalArgumentException("An account with this email already exists."))
         return try {
-            val role = if (cleanEmail == "admin@campus.local") Roles.ADMIN else Roles.STUDENT
+            val role = if (cleanEmail == "admincampus@gmail.com") Roles.ADMIN else Roles.STUDENT
             val id = dao.insertUser(UserEntity(name = cleanName, email = cleanEmail,
                 passwordHash = Passwords.hash(password), role = role))
             Result.success(dao.userById(id)!!)
@@ -118,11 +135,28 @@ class CampusRepository(private val db: CampusDatabase, context: Context? = null)
     }
 
     suspend fun login(email: String, password: String): Result<UserEntity> {
+        val cleanEmail = email.trim().lowercase(Locale.ROOT)
         if (firebase?.configured == true) {
-            return try { Result.success(firebase.login(email, password, dao)) }
-            catch (e: Exception) { Result.failure(IllegalArgumentException(e.message ?: "Firebase sign in failed.")) }
+            try {
+                return Result.success(firebase.login(cleanEmail, password, dao))
+            } catch (e: Exception) {
+                val isNetworkError = e.javaClass.simpleName.contains("Network", ignoreCase = true) ||
+                        (e.message?.contains("network", ignoreCase = true) == true) ||
+                        (e.message?.contains("unreachable", ignoreCase = true) == true) ||
+                        (e.message?.contains("timeout", ignoreCase = true) == true)
+                if (isNetworkError) {
+                    val localUser = dao.userByEmail(cleanEmail)
+                    if (localUser != null) {
+                        if (!localUser.active) return Result.failure(IllegalArgumentException("This account is disabled."))
+                        if (localUser.passwordHash.isBlank() || Passwords.matches(password, localUser.passwordHash)) {
+                            return Result.success(localUser)
+                        }
+                    }
+                }
+                return Result.failure(IllegalArgumentException(e.message ?: "Firebase sign in failed."))
+            }
         }
-        val user = dao.userByEmail(email.trim().lowercase(Locale.ROOT))
+        val user = dao.userByEmail(cleanEmail)
             ?: return Result.failure(IllegalArgumentException("Email or password is incorrect."))
         if (!user.active) return Result.failure(IllegalArgumentException("This account is disabled."))
         if (!Passwords.matches(password, user.passwordHash))
@@ -130,7 +164,26 @@ class CampusRepository(private val db: CampusDatabase, context: Context? = null)
         return Result.success(user)
     }
 
-    fun events(search: String = "", category: String = "All") = dao.searchEvents(search, category)
+    suspend fun resetPassword(email: String): Result<Unit> {
+        val cleanEmail = email.trim().lowercase(Locale.ROOT)
+        if (!android.util.Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches())
+            return Result.failure(IllegalArgumentException("Enter a valid email address."))
+        if (firebase?.configured == true) {
+            return try {
+                firebase.sendPasswordResetEmail(cleanEmail)
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(IllegalArgumentException(e.message ?: "Could not send reset email."))
+            }
+        }
+        val user = dao.userByEmail(cleanEmail)
+            ?: return Result.failure(IllegalArgumentException("No account found with this email address."))
+        return Result.success(Unit)
+    }
+
+    fun events(search: String = "", category: String = "All") = dao.searchEvents(search, category, todayDate())
+    fun eventsByOrganiser(organiserId: Long) = dao.eventsByOrganiser(organiserId)
+    fun eventAttendees(eventId: Long) = dao.eventAttendees(eventId)
     fun userFlow(id: Long): kotlinx.coroutines.flow.Flow<UserEntity?> = dao.userByIdFlow(id)
     fun users() = dao.users()
     fun pendingApplications() = dao.pendingApplications()
@@ -195,6 +248,24 @@ class CampusRepository(private val db: CampusDatabase, context: Context? = null)
         }
         dao.insertEvent(EventEntity(title = title.trim(), category = category, date = date, time = time,
             location = location.trim(), organiserName = organisation.trim(), description = description.trim(), organiserId = user.id))
+        return Result.success(Unit)
+    }
+
+    suspend fun updateEvent(user: UserEntity, event: EventEntity): Result<Unit> {
+        if (user.role != Roles.ORGANISER && user.role != Roles.ADMIN)
+            return Result.failure(IllegalStateException("Only approved organisers can update events."))
+        if (event.title.trim().length < 3 || event.description.trim().length < 10 ||
+            event.location.trim().isEmpty() || event.organiserName.trim().isEmpty())
+            return Result.failure(IllegalArgumentException("Complete all event fields."))
+        if (!event.date.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) || !event.time.matches(Regex("\\d{2}:\\d{2}")))
+            return Result.failure(IllegalArgumentException("Use date YYYY-MM-DD and time HH:MM."))
+        if (firebase?.configured == true) {
+            return try {
+                firebase.updateEvent(event, dao)
+                Result.success(Unit)
+            } catch (e: Exception) { Result.failure(IllegalStateException(e.message ?: "Could not update event.")) }
+        }
+        dao.updateEvent(event)
         return Result.success(Unit)
     }
 

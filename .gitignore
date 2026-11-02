@@ -1,7 +1,26 @@
-# Never commit Firebase service-account credentials
+
+# Firebase service-account credentials - NEVER upload
 firebase/scripts/serviceAccountKey.json
 **/serviceAccountKey.json
-# Local Android/Gradle build output
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Android Studio
+.idea/
+*.iml
+
+# Gradle
 .gradle/
 **/build/
 local.properties
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Operating system files
+.DS_Store
+Thumbs.db
